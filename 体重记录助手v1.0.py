@@ -37,7 +37,7 @@ def convert_date_columns(df):
             # 移除无效的日期
             df = df.dropna(subset=['日期'])
         except Exception as e:
-            st.error(f"日期转换错误: {e}")
+            st.warning(f"日期转换错误: {e}")
     return df
 
 # 加载数据函数
@@ -63,7 +63,14 @@ def load_target_info():
     try:
         if TARGET_INFO_FILE.exists() and TARGET_INFO_FILE.stat().st_size > 0:
             with open(TARGET_INFO_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+                # 确保所有数值都是float类型
+                for key in ['current_weight', 'target_weight', 'daily_target']:
+                    if key in data:
+                        data[key] = float(data[key])
+                if 'plan_days' in data:
+                    data['plan_days'] = int(data['plan_days'])
+                return data
     except Exception as e:
         st.error(f"加载目标信息时出错: {e}")
     return {}
@@ -80,23 +87,42 @@ def save_weight_data(df):
             # 保存到CSV
             df_copy.to_csv(WEIGHT_DATA_FILE, index=False)
             return True
+        else:
+            # 如果是空DataFrame，删除文件
+            if WEIGHT_DATA_FILE.exists():
+                WEIGHT_DATA_FILE.unlink()
+            return True
     except Exception as e:
         st.error(f"保存体重数据时出错: {e}")
-        # 显示更多错误信息用于调试
-        if 'df_copy' in locals():
-            st.write(f"数据类型: {df_copy['日期'].dtype}")
-            st.write(f"前几行数据: {df_copy.head()}")
-    return False
+        return False
 
-def save_target_info(info):
+def save_target_info():
     """保存目标信息到文件"""
     try:
+        if not st.session_state.target_info:
+            # 如果是空目标信息，删除文件
+            if TARGET_INFO_FILE.exists():
+                TARGET_INFO_FILE.unlink()
+            return True
+        
+        # 确保所有数值类型正确
+        target_info = {}
+        for key, value in st.session_state.target_info.items():
+            if isinstance(value, (np.integer, np.floating)):
+                target_info[key] = float(value)
+            elif isinstance(value, (datetime, pd.Timestamp)):
+                target_info[key] = value.strftime('%Y-%m-%d')
+            elif isinstance(value, np.ndarray):
+                target_info[key] = value.tolist()
+            else:
+                target_info[key] = value
+        
         with open(TARGET_INFO_FILE, 'w', encoding='utf-8') as f:
-            json.dump(info, f, ensure_ascii=False, indent=2)
+            json.dump(target_info, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
         st.error(f"保存目标信息时出错: {e}")
-    return False
+        return False
 
 # 初始化session state
 if 'weight_data' not in st.session_state:
@@ -401,6 +427,10 @@ elif menu == "📝 记录体重":
                     message = f"✅ 已更新 {record_date} 的体重记录为 {weight}kg"
                 else:
                     # 添加新记录
+                    new_record_df = pd.DataFrame({
+                        '日期': [new_record_date],
+                        '体重(kg)': [float(weight)]
+                    })
                     st.session_state.weight_data = pd.concat(
                         [st.session_state.weight_data, new_record_df], 
                         ignore_index=True
@@ -628,20 +658,22 @@ elif menu == "🎯 设置目标":
         if current_weight is None:
             st.error("请先输入当前体重")
         else:
+            # 创建目标信息字典 - 确保所有值都是Python基本类型
             target_info = {
                 'current_weight': float(current_weight),
                 'target_weight': float(target_weight),
                 'plan_days': int(plan_days),
                 'daily_target': float(daily_target),
-                'set_date': datetime.now().strftime('%Y-%m-%d'),
-                'end_date': (datetime.now().date() + timedelta(days=plan_days)).strftime('%Y-%m-%d')
+                'set_date': datetime.now().strftime('%Y-%m-%d'),  # 字符串，不是datetime对象
+                'end_date': (datetime.now().date() + timedelta(days=plan_days)).strftime('%Y-%m-%d')  # 字符串
             }
             
             st.session_state.target_info = target_info
             
             # 保存到文件
-            if save_target_info():
+            if save_target_info():  # 注意：这里不再传递参数，函数从session_state读取
                 st.success("✅ 目标计划已保存！")
+                st.rerun()
             else:
                 st.error("保存目标时出错，请重试")
     
@@ -654,13 +686,19 @@ elif menu == "🎯 设置目标":
         col_info1, col_info2 = st.columns(2)
         
         with col_info1:
-            st.write(f"**目标体重**: {info.get('target_weight', 0):.1f}kg")
-            st.write(f"**计划天数**: {info.get('plan_days', 0)} 天")
+            current = info.get('current_weight', 0)
+            target = info.get('target_weight', 0)
+            days = info.get('plan_days', 0)
+            st.write(f"**当前体重**: {current:.1f}kg")
+            st.write(f"**目标体重**: {target:.1f}kg")
         
         with col_info2:
-            st.write(f"**每日目标**: {info.get('daily_target', 0):.3f}kg/天")
-            if info.get('end_date'):
-                st.write(f"**预计完成**: {info['end_date']}")
+            daily = info.get('daily_target', 0)
+            end_date = info.get('end_date', '未设置')
+            st.write(f"**每日目标**: {daily:.3f}kg/天")
+            st.write(f"**预计完成**: {end_date}")
+            if daily > 0:
+                st.write(f"**计划天数**: {days} 天")
 
 # 图表分析
 elif menu == "📈 图表分析":
@@ -858,9 +896,6 @@ elif menu == "📈 图表分析":
         
         except Exception as e:
             st.error(f"图表分析时出错: {str(e)}")
-            st.write("数据详情：")
-            st.write(st.session_state.weight_data.head())
-            st.write(f"数据类型：{st.session_state.weight_data.dtypes}")
 
 # 进度预测
 elif menu == "🔮 进度预测":
@@ -1069,10 +1104,6 @@ elif menu == "🔮 进度预测":
         
         except Exception as e:
             st.error(f"进度预测时出错: {str(e)}")
-            st.write("调试信息：")
-            st.write(f"当前体重: {current_weight}")
-            st.write(f"目标体重: {target_weight}")
-            st.write(f"每日目标: {daily_target}")
 
 # 页脚
 st.divider()
@@ -1097,6 +1128,6 @@ with col_footer2:
         st.caption(f"🎯 目标体重：{target}kg")
 
 with col_footer3:
-    st.caption("⚖️ v2.2")
+    st.caption("⚖️ v2.3")
 
 st.caption("体重管理助手 | 数据自动保存 | 程序编写：房星宇")
